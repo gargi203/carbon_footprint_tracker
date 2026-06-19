@@ -1,5 +1,7 @@
 # EcoTrack AI - Environmental Sustainability Copilot
 
+**Live Demo:** [https://ecotrackai-tau.vercel.app](https://ecotrackai-tau.vercel.app)
+
 EcoTrack AI is an intelligent sustainability web application designed to help individuals calculate, understand, and reduce their carbon footprint through practical actions and personalized AI-driven insights.
 
 ## Chosen Vertical
