@@ -26,7 +26,8 @@ const AppContent: React.FC = () => {
     currentUser, 
     userProfile, 
     logout, 
-    resetApp 
+    resetApp,
+    isCloudMode
   } = useEcoTrack();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -43,7 +44,16 @@ const AppContent: React.FC = () => {
               className="w-10 h-10 rounded-xl shadow-md border border-gray-250/20"
             />
             <div>
-              <span className="font-extrabold font-display text-lg tracking-tight text-gray-800 dark:text-white block">EcoTrack AI</span>
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold font-display text-lg tracking-tight text-gray-800 dark:text-white block">EcoTrack AI</span>
+                <span className={`text-[8px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
+                  isCloudMode 
+                    ? 'bg-eco-500/10 text-eco-600 dark:text-eco-400 border border-eco-550/20' 
+                    : 'bg-amber-500/10 text-amber-600 dark:text-amber-450 border border-amber-500/20'
+                }`}>
+                  {isCloudMode ? 'Supabase DB' : 'Sandbox Mode'}
+                </span>
+              </div>
               <span className="text-[10px] text-eco-600 dark:text-eco-400 font-bold tracking-wider uppercase block">Sustainability Copilot</span>
             </div>
           </div>
@@ -75,7 +85,16 @@ const AppContent: React.FC = () => {
               className="w-10 h-10 rounded-xl shadow-md border border-gray-250/20"
             />
             <div>
-              <span className="font-extrabold font-display text-lg tracking-tight text-gray-800 dark:text-white block">EcoTrack AI</span>
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold font-display text-lg tracking-tight text-gray-800 dark:text-white block">EcoTrack AI</span>
+                <span className={`text-[8px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
+                  isCloudMode 
+                    ? 'bg-eco-500/10 text-eco-600 dark:text-eco-400 border border-eco-550/20' 
+                    : 'bg-amber-500/10 text-amber-600 dark:text-amber-450 border border-amber-500/20'
+                }`}>
+                  {isCloudMode ? 'Supabase DB' : 'Sandbox Mode'}
+                </span>
+              </div>
               <span className="text-[10px] text-eco-600 dark:text-eco-400 font-bold tracking-wider uppercase block">Sustainability Copilot</span>
             </div>
           </div>
@@ -140,7 +159,16 @@ const AppContent: React.FC = () => {
             className="w-10 h-10 rounded-xl shadow-md border border-gray-250/20"
           />
           <div>
-            <span className="font-extrabold font-display text-lg tracking-tight text-gray-800 dark:text-white block">EcoTrack AI</span>
+            <div className="flex items-center gap-2">
+              <span className="font-extrabold font-display text-lg tracking-tight text-gray-800 dark:text-white block">EcoTrack AI</span>
+              <span className={`text-[8px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider ${
+                isCloudMode 
+                  ? 'bg-eco-500/10 text-eco-600 dark:text-eco-400 border border-eco-550/20' 
+                  : 'bg-amber-500/10 text-amber-600 dark:text-amber-450 border border-amber-500/20'
+              }`}>
+                {isCloudMode ? 'Supabase DB' : 'Sandbox Mode'}
+              </span>
+            </div>
             <span className="text-[10px] text-eco-600 dark:text-eco-400 font-bold tracking-wider uppercase block">Sustainability Copilot</span>
           </div>
         </div>

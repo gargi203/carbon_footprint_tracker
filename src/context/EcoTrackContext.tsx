@@ -5,6 +5,7 @@ import {
   type CalculationResult, 
   type EmissionBreakdown
 } from '../utils/carbonCalculator';
+import { supabase, isSupabaseConfigured } from '../utils/supabaseClient';
 
 export interface HistoricalRecord {
   week: string; // e.g. "Week 1", "Week 2"
@@ -69,8 +70,10 @@ interface EcoTrackContextType {
     nextLevelPoints: number;
     progressPercent: number;
   };
-  login: (email: string, password: string) => { success: boolean; error?: string };
-  signUp: (name: string, email: string, password: string) => { success: boolean; error?: string };
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  signUp: (name: string, email: string, password: string) => Promise<{ success: boolean; error?: string }>;
+  loginWithGoogle: () => Promise<void>;
+  loginWithGithub: () => Promise<void>;
   logout: () => void;
   submitOnboarding: (data: OnboardingData) => void;
   addGoal: (goal: Omit<Goal, 'id' | 'isCompleted' | 'currentValue' | 'createdAt'>) => void;
@@ -78,6 +81,7 @@ interface EcoTrackContextType {
   deleteGoal: (id: string) => void;
   completeChallenge: (id: string) => void;
   resetApp: () => void;
+  isCloudMode: boolean;
 }
 
 const EcoTrackContext = createContext<EcoTrackContextType | undefined>(undefined);
@@ -211,9 +215,176 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [challenges, setChallenges] = useState<Challenge[]>([]);
   const [ecoPoints, setEcoPoints] = useState<number>(0);
   const [badges, setBadges] = useState<Badge[]>(INITIAL_BADGES);
+  
+  const [supabaseUserId, setSupabaseUserId] = useState<string | null>(null);
 
-  // Initialize Auth & Seeds on mount
+  // Identify running mode
+  const isCloudMode = isSupabaseConfigured;
+
+  // ----------------------------------------------------
+  // CLOUD DATABASE SYNC LOGIC (SUPABASE)
+  // ----------------------------------------------------
+  
+  const loadSupabaseData = async (userId: string) => {
+    try {
+      // 1. Fetch Profile
+      const { data: profile, error: profileErr } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+      
+      if (profileErr) {
+        console.error('Error fetching profile:', profileErr);
+        return;
+      }
+
+      if (profile) {
+        setUserProfile(profile.onboarding_data);
+        setCalculationResult(profile.calculation_result);
+        setEcoPoints(profile.eco_points || 0);
+      } else {
+        setUserProfile(null);
+        setCalculationResult(null);
+        setEcoPoints(0);
+      }
+
+      // 2. Fetch History
+      const { data: histData } = await supabase
+        .from('history')
+        .select('*')
+        .eq('user_id', userId);
+      if (histData && histData.length > 0) {
+        // Sort by week index (Week 1, Week 2...)
+        const sorted = [...histData].sort((a, b) => a.week.localeCompare(b.week));
+        setHistory(sorted.map(h => ({
+          week: h.week,
+          date: h.date,
+          co2Emissions: h.co2_emissions,
+          breakdown: h.breakdown,
+          ecoPoints: h.eco_points
+        })));
+      } else {
+        setHistory([]);
+      }
+
+      // 3. Fetch Goals
+      const { data: goalsData } = await supabase
+        .from('goals')
+        .select('*')
+        .eq('user_id', userId);
+      if (goalsData) {
+        setGoals(goalsData.map(g => ({
+          id: g.id,
+          category: g.category as any,
+          title: g.title,
+          targetValue: Number(g.target_value),
+          currentValue: Number(g.current_value),
+          unit: g.unit,
+          co2Savings: Number(g.co2_savings),
+          isCompleted: g.is_completed,
+          createdAt: g.created_at
+        })));
+      } else {
+        setGoals([]);
+      }
+
+      // 4. Fetch Challenges
+      const { data: challengesData } = await supabase
+        .from('challenges')
+        .select('*')
+        .eq('user_id', userId);
+      if (challengesData) {
+        setChallenges(challengesData.map(c => ({
+          id: c.id,
+          category: c.category as any,
+          title: c.title,
+          description: c.description,
+          pointsReward: c.points_reward,
+          co2Savings: Number(c.co2_savings),
+          isCompleted: c.is_completed,
+          completedAt: c.completed_at || undefined,
+          priority: c.priority as any
+        })));
+      } else {
+        setChallenges([]);
+      }
+
+      // 5. Fetch Badges
+      const { data: badgesData } = await supabase
+        .from('badges')
+        .select('*')
+        .eq('user_id', userId);
+      if (badgesData && badgesData.length > 0) {
+        setBadges(badgesData.map(b => ({
+          id: b.id,
+          title: b.title,
+          description: b.description,
+          iconName: b.icon_name,
+          isEarned: b.is_earned,
+          earnedAt: b.earned_at || undefined
+        })));
+      } else {
+        setBadges(INITIAL_BADGES);
+      }
+
+    } catch (err) {
+      console.error('Failed to load user data from Supabase:', err);
+    }
+  };
+
+  // Listen to Supabase Auth state changes if cloud mode is enabled
   useEffect(() => {
+    if (!isCloudMode) return;
+
+    // Check current session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        const email = session.user.email || '';
+        const name = session.user.user_metadata?.name || email.split('@')[0] || 'User';
+        setCurrentUser({ name, email });
+        setSupabaseUserId(session.user.id);
+        setIsAuthenticated(true);
+        loadSupabaseData(session.user.id);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+      if (session?.user) {
+        const email = session.user.email || '';
+        const name = session.user.user_metadata?.name || email.split('@')[0] || 'User';
+        setCurrentUser({ name, email });
+        setSupabaseUserId(session.user.id);
+        setIsAuthenticated(true);
+        await loadSupabaseData(session.user.id);
+      } else {
+        setCurrentUser(null);
+        setSupabaseUserId(null);
+        setIsAuthenticated(false);
+        setUserProfile(null);
+        setCalculationResult(null);
+        setHistory([]);
+        setGoals([]);
+        setChallenges([]);
+        setEcoPoints(0);
+        setBadges(INITIAL_BADGES);
+      }
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, [isCloudMode]);
+
+
+  // ----------------------------------------------------
+  // LOCAL STORAGE STATE MANAGEMENT (FALLBACK MODE)
+  // ----------------------------------------------------
+  
+  // Initialize Auth & Seeds on mount (localStorage fallback only)
+  useEffect(() => {
+    if (isCloudMode) return; // Skip if in cloud database mode
+
     // 1. Check for logged in session
     const activeSession = localStorage.getItem('ecotrack_session');
     if (activeSession) {
@@ -228,7 +399,7 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       const demoAccount: UserAccount = {
         name: 'Jane Doe',
         email: 'demo@ecotrack.ai',
-        passwordHash: 'password123' // simple plain mock credentials
+        passwordHash: 'password123'
       };
       localStorage.setItem('ecotrack_accounts', JSON.stringify([demoAccount]));
 
@@ -323,10 +494,12 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       });
       localStorage.setItem(`ecotrack_badges_${email}`, JSON.stringify(seedBadges));
     }
-  }, []);
+  }, [isCloudMode]);
 
-  // 3. Load user segregated state when auth user changes
+  // Load user segregated localStorage state when auth changes (localStorage fallback only)
   useEffect(() => {
+    if (isCloudMode) return; // Skip if in cloud database mode
+    
     if (!currentUser) {
       setUserProfile(null);
       setCalculationResult(null);
@@ -354,107 +527,163 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     setChallenges(savedChallenges ? JSON.parse(savedChallenges) : []);
     setEcoPoints(savedPoints ? parseInt(savedPoints, 10) : 0);
     setBadges(savedBadges ? JSON.parse(savedBadges) : INITIAL_BADGES);
-  }, [currentUser]);
+  }, [currentUser, isCloudMode]);
 
-  // 4. Save updates to user segregated localStorage
+  // Save updates to user segregated localStorage (localStorage fallback only)
   useEffect(() => {
-    if (!currentUser) return;
+    if (isCloudMode || !currentUser) return;
     const email = currentUser.email;
     if (userProfile) localStorage.setItem(`ecotrack_profile_${email}`, JSON.stringify(userProfile));
     else localStorage.removeItem(`ecotrack_profile_${email}`);
-  }, [userProfile, currentUser]);
+  }, [userProfile, currentUser, isCloudMode]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (isCloudMode || !currentUser) return;
     const email = currentUser.email;
     if (calculationResult) localStorage.setItem(`ecotrack_result_${email}`, JSON.stringify(calculationResult));
     else localStorage.removeItem(`ecotrack_result_${email}`);
-  }, [calculationResult, currentUser]);
+  }, [calculationResult, currentUser, isCloudMode]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (isCloudMode || !currentUser) return;
     const email = currentUser.email;
     if (history.length > 0) localStorage.setItem(`ecotrack_history_${email}`, JSON.stringify(history));
     else localStorage.removeItem(`ecotrack_history_${email}`);
-  }, [history, currentUser]);
+  }, [history, currentUser, isCloudMode]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (isCloudMode || !currentUser) return;
     const email = currentUser.email;
     localStorage.setItem(`ecotrack_goals_${email}`, JSON.stringify(goals));
-  }, [goals, currentUser]);
+  }, [goals, currentUser, isCloudMode]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (isCloudMode || !currentUser) return;
     const email = currentUser.email;
     localStorage.setItem(`ecotrack_challenges_${email}`, JSON.stringify(challenges));
-  }, [challenges, currentUser]);
+  }, [challenges, currentUser, isCloudMode]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (isCloudMode || !currentUser) return;
     const email = currentUser.email;
     localStorage.setItem(`ecotrack_points_${email}`, ecoPoints.toString());
-  }, [ecoPoints, currentUser]);
+  }, [ecoPoints, currentUser, isCloudMode]);
 
   useEffect(() => {
-    if (!currentUser) return;
+    if (isCloudMode || !currentUser) return;
     const email = currentUser.email;
     localStorage.setItem(`ecotrack_badges_${email}`, JSON.stringify(badges));
-  }, [badges, currentUser]);
+  }, [badges, currentUser, isCloudMode]);
 
-  // 5. Auth API functions
-  const login = (email: string, password: string) => {
-    const savedAccounts = localStorage.getItem('ecotrack_accounts');
-    const accounts: UserAccount[] = savedAccounts ? JSON.parse(savedAccounts) : [];
-    
-    const user = accounts.find(acc => acc.email.toLowerCase() === email.toLowerCase());
-    
-    if (!user) {
-      return { success: false, error: 'No account found with this email.' };
-    }
-    if (user.passwordHash !== password) {
-      return { success: false, error: 'Incorrect password.' };
-    }
 
-    const sessionUser = { name: user.name, email: user.email };
-    localStorage.setItem('ecotrack_session', JSON.stringify(sessionUser));
-    setCurrentUser(sessionUser);
-    setIsAuthenticated(true);
-    return { success: true };
+  // ----------------------------------------------------
+  // CONTEXT HANDLERS (HYBRID WRAPPERS)
+  // ----------------------------------------------------
+  
+  const login = async (email: string, password: string) => {
+    if (isCloudMode) {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) {
+        return { success: false, error: error.message };
+      }
+      return { success: true };
+    } else {
+      const savedAccounts = localStorage.getItem('ecotrack_accounts');
+      const accounts: UserAccount[] = savedAccounts ? JSON.parse(savedAccounts) : [];
+      
+      const user = accounts.find(acc => acc.email.toLowerCase() === email.toLowerCase());
+      
+      if (!user) {
+        return { success: false, error: 'No account found with this email.' };
+      }
+      if (user.passwordHash !== password) {
+        return { success: false, error: 'Incorrect password.' };
+      }
+
+      const sessionUser = { name: user.name, email: user.email };
+      localStorage.setItem('ecotrack_session', JSON.stringify(sessionUser));
+      setCurrentUser(sessionUser);
+      setIsAuthenticated(true);
+      return { success: true };
+    }
   };
 
-  const signUp = (name: string, email: string, password: string) => {
-    const savedAccounts = localStorage.getItem('ecotrack_accounts');
-    const accounts: UserAccount[] = savedAccounts ? JSON.parse(savedAccounts) : [];
+  const signUp = async (name: string, email: string, password: string) => {
+    if (isCloudMode) {
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { name }
+        }
+      });
+      if (error) {
+        return { success: false, error: error.message };
+      }
+      return { success: true };
+    } else {
+      const savedAccounts = localStorage.getItem('ecotrack_accounts');
+      const accounts: UserAccount[] = savedAccounts ? JSON.parse(savedAccounts) : [];
 
-    const exists = accounts.some(acc => acc.email.toLowerCase() === email.toLowerCase());
-    if (exists) {
-      return { success: false, error: 'An account with this email already exists.' };
+      const exists = accounts.some(acc => acc.email.toLowerCase() === email.toLowerCase());
+      if (exists) {
+        return { success: false, error: 'An account with this email already exists.' };
+      }
+
+      const newUser: UserAccount = {
+        name,
+        email: email.toLowerCase(),
+        passwordHash: password
+      };
+
+      const nextAccounts = [...accounts, newUser];
+      localStorage.setItem('ecotrack_accounts', JSON.stringify(nextAccounts));
+
+      const sessionUser = { name: newUser.name, email: newUser.email };
+      localStorage.setItem('ecotrack_session', JSON.stringify(sessionUser));
+      setCurrentUser(sessionUser);
+      setIsAuthenticated(true);
+      return { success: true };
     }
-
-    const newUser: UserAccount = {
-      name,
-      email: email.toLowerCase(),
-      passwordHash: password
-    };
-
-    const nextAccounts = [...accounts, newUser];
-    localStorage.setItem('ecotrack_accounts', JSON.stringify(nextAccounts));
-
-    const sessionUser = { name: newUser.name, email: newUser.email };
-    localStorage.setItem('ecotrack_session', JSON.stringify(sessionUser));
-    setCurrentUser(sessionUser);
-    setIsAuthenticated(true);
-    return { success: true };
   };
 
-  const logout = () => {
-    localStorage.removeItem('ecotrack_session');
-    setCurrentUser(null);
-    setIsAuthenticated(false);
+  const loginWithGoogle = async () => {
+    if (isCloudMode) {
+      await supabase.auth.signInWithOAuth({
+        provider: 'google',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+    } else {
+      console.warn('Google login only available in Supabase cloud database mode.');
+    }
   };
 
-  // 6. Level Logic
+  const loginWithGithub = async () => {
+    if (isCloudMode) {
+      await supabase.auth.signInWithOAuth({
+        provider: 'github',
+        options: {
+          redirectTo: window.location.origin
+        }
+      });
+    } else {
+      console.warn('GitHub login only available in Supabase cloud database mode.');
+    }
+  };
+
+  const logout = async () => {
+    if (isCloudMode) {
+      await supabase.auth.signOut();
+    } else {
+      localStorage.removeItem('ecotrack_session');
+      setCurrentUser(null);
+      setIsAuthenticated(false);
+    }
+  };
+
+  // Level Logic
   const getLevelInfo = (points: number) => {
     let levelNum = 1;
     let levelName = 'Eco Novice';
@@ -510,12 +739,10 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
   };
 
-  // 7. Core data submission rules
-  const submitOnboarding = (data: OnboardingData) => {
+  const submitOnboarding = async (data: OnboardingData) => {
     const result = calculateFootprint(data);
-    setUserProfile(data);
-    setCalculationResult(result);
-
+    
+    // Calculate priorities for challenges
     const totalEmissions = result.breakdown.total || 1;
     const transportRatio = result.breakdown.transport / totalEmissions;
     const foodRatio = result.breakdown.food / totalEmissions;
@@ -538,7 +765,6 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         priority
       };
     });
-    setChallenges(initializedChallenges);
 
     const mockHistory: HistoricalRecord[] = [];
     const dateToday = new Date();
@@ -572,18 +798,115 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       ecoPoints: 500
     });
 
-    setHistory(mockHistory);
     let points = 500;
     let currentBadges = [...INITIAL_BADGES];
     currentBadges = unlockBadge('first_step', currentBadges);
-    points += 100; // Bonus Streak points
+    points += 100; // Bonus points
     currentBadges = unlockBadge('consistent_champion', currentBadges);
 
-    setEcoPoints(points);
-    setBadges(currentBadges);
+    // Default transit goal
+    const newGoals: Goal[] = [
+      {
+        id: 'g1',
+        category: 'transport',
+        title: 'Ride Public Transit 3x Weekly',
+        targetValue: 3,
+        currentValue: 0,
+        unit: 'times/week',
+        co2Savings: 160,
+        isCompleted: false,
+        createdAt: new Date().toISOString().split('T')[0]
+      }
+    ];
+
+    if (isCloudMode && supabaseUserId) {
+      try {
+        // 1. Update profiles table
+        await supabase
+          .from('profiles')
+          .update({
+            onboarding_data: data,
+            calculation_result: result,
+            eco_points: points
+          })
+          .eq('id', supabaseUserId);
+
+        // 2. Insert challenges
+        const challengeInserts = initializedChallenges.map(c => ({
+          id: c.id,
+          user_id: supabaseUserId,
+          category: c.category,
+          title: c.title,
+          description: c.description,
+          points_reward: c.pointsReward,
+          co2_savings: c.co2Savings,
+          is_completed: c.isCompleted,
+          priority: c.priority
+        }));
+        await supabase.from('challenges').insert(challengeInserts);
+
+        // 3. Insert goals
+        const goalInserts = newGoals.map(g => ({
+          id: g.id,
+          user_id: supabaseUserId,
+          category: g.category,
+          title: g.title,
+          target_value: g.targetValue,
+          current_value: g.currentValue,
+          unit: g.unit,
+          co2_savings: g.co2Savings,
+          is_completed: g.isCompleted,
+          created_at: g.createdAt
+        }));
+        await supabase.from('goals').insert(goalInserts);
+
+        // 4. Insert history
+        const historyInserts = mockHistory.map(h => ({
+          user_id: supabaseUserId,
+          week: h.week,
+          date: h.date,
+          co2_emissions: h.co2Emissions,
+          breakdown: h.breakdown,
+          eco_points: h.ecoPoints
+        }));
+        await supabase.from('history').insert(historyInserts);
+
+        // 5. Insert badges
+        const badgeInserts = currentBadges.map(b => ({
+          id: b.id,
+          user_id: supabaseUserId,
+          title: b.title,
+          description: b.description,
+          icon_name: b.iconName,
+          is_earned: b.isEarned,
+          earned_at: b.earnedAt || null
+        }));
+        await supabase.from('badges').insert(badgeInserts);
+
+        // Refresh UI state
+        setUserProfile(data);
+        setCalculationResult(result);
+        setChallenges(initializedChallenges);
+        setGoals(newGoals);
+        setHistory(mockHistory);
+        setEcoPoints(points);
+        setBadges(currentBadges);
+
+      } catch (err) {
+        console.error('Failed to save onboarding to database:', err);
+      }
+    } else {
+      setUserProfile(data);
+      setCalculationResult(result);
+      setChallenges(initializedChallenges);
+      setGoals(newGoals);
+      setHistory(mockHistory);
+      setEcoPoints(points);
+      setBadges(currentBadges);
+    }
   };
 
-  const addGoal = (newGoal: Omit<Goal, 'id' | 'isCompleted' | 'currentValue' | 'createdAt'>) => {
+  const addGoal = async (newGoal: Omit<Goal, 'id' | 'isCompleted' | 'currentValue' | 'createdAt'>) => {
     const goal: Goal = {
       ...newGoal,
       id: Math.random().toString(36).substring(2, 9),
@@ -591,95 +914,267 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       isCompleted: false,
       createdAt: new Date().toISOString().split('T')[0]
     };
-    setGoals(prev => [goal, ...prev]);
+
+    if (isCloudMode && supabaseUserId) {
+      try {
+        await supabase.from('goals').insert({
+          id: goal.id,
+          user_id: supabaseUserId,
+          category: goal.category,
+          title: goal.title,
+          target_value: goal.targetValue,
+          current_value: goal.currentValue,
+          unit: goal.unit,
+          co2_savings: goal.co2Savings,
+          is_completed: goal.isCompleted,
+          created_at: goal.createdAt
+        });
+        setGoals(prev => [goal, ...prev]);
+      } catch (err) {
+        console.error('Failed to add goal:', err);
+      }
+    } else {
+      setGoals(prev => [goal, ...prev]);
+    }
   };
 
-  const updateGoalProgress = (id: string, progress: number) => {
-    setGoals(prev => prev.map(goal => {
-      if (goal.id === id) {
-        const isNowCompleted = progress >= goal.targetValue;
-        const wasCompleted = goal.isCompleted;
+  const updateGoalProgress = async (id: string, progress: number) => {
+    // Find goal first
+    const targetGoal = goals.find(g => g.id === id);
+    if (!targetGoal) return;
 
-        if (isNowCompleted && !wasCompleted) {
-          const pointsReward = 100;
+    const isNowCompleted = progress >= targetGoal.targetValue;
+    const wasCompleted = targetGoal.isCompleted;
+    let pointDiff = 0;
+    
+    if (isNowCompleted && !wasCompleted) {
+      pointDiff = 100;
+    }
+
+    if (isCloudMode && supabaseUserId) {
+      try {
+        // Update goals
+        await supabase
+          .from('goals')
+          .update({
+            current_value: progress,
+            is_completed: isNowCompleted
+          })
+          .eq('id', id);
+
+        if (pointDiff > 0) {
+          // Update profile points
+          const nextPoints = ecoPoints + pointDiff;
+          await supabase
+            .from('profiles')
+            .update({ eco_points: nextPoints })
+            .eq('id', supabaseUserId);
+          setEcoPoints(nextPoints);
+
+          // Update badges
+          let updatedBadges = [...badges];
+          if (targetGoal.category === 'transport') updatedBadges = unlockBadge('green_commuter', updatedBadges);
+          if (targetGoal.category === 'energy') updatedBadges = unlockBadge('energy_saver', updatedBadges);
+          if (targetGoal.category === 'food') updatedBadges = unlockBadge('plant_powered', updatedBadges);
+          if (targetGoal.category === 'consumption') updatedBadges = unlockBadge('waste_warrior', updatedBadges);
+
+          const completedCount = goals.filter(g => g.isCompleted || g.id === id).length;
+          if (completedCount >= 3) {
+            updatedBadges = unlockBadge('goal_crusher', updatedBadges);
+          }
+
+          // Save badges to database
+          for (const b of updatedBadges) {
+            if (b.isEarned) {
+              await supabase
+                .from('badges')
+                .update({ is_earned: true, earned_at: b.earnedAt || new Date().toISOString().split('T')[0] })
+                .eq('id', b.id)
+                .eq('user_id', supabaseUserId);
+            }
+          }
+          setBadges(updatedBadges);
+        }
+
+        // Update local state goal
+        setGoals(prev => prev.map(g => g.id === id ? { ...g, currentValue: progress, isCompleted: isNowCompleted } : g));
+
+      } catch (err) {
+        console.error('Failed to update goal progress:', err);
+      }
+    } else {
+      setGoals(prev => prev.map(goal => {
+        if (goal.id === id) {
+          if (isNowCompleted && !wasCompleted) {
+            setEcoPoints(pts => pts + pointDiff);
+            setTimeout(() => {
+              setBadges(currBadges => {
+                let updated = [...currBadges];
+                if (goal.category === 'transport') updated = unlockBadge('green_commuter', updated);
+                if (goal.category === 'energy') updated = unlockBadge('energy_saver', updated);
+                if (goal.category === 'food') updated = unlockBadge('plant_powered', updated);
+                if (goal.category === 'consumption') updated = unlockBadge('waste_warrior', updated);
+
+                const completedCount = goals.filter(g => g.isCompleted || g.id === id).length;
+                if (completedCount >= 3) {
+                  updated = unlockBadge('goal_crusher', updated);
+                }
+                return updated;
+              });
+            }, 0);
+          }
+
+          return {
+            ...goal,
+            currentValue: progress,
+            isCompleted: isNowCompleted
+          };
+        }
+        return goal;
+      }));
+    }
+  };
+
+  const deleteGoal = async (id: string) => {
+    if (isCloudMode && supabaseUserId) {
+      try {
+        await supabase.from('goals').delete().eq('id', id);
+        setGoals(prev => prev.filter(g => g.id !== id));
+      } catch (err) {
+        console.error('Failed to delete goal:', err);
+      }
+    } else {
+      setGoals(prev => prev.filter(g => g.id !== id));
+    }
+  };
+
+  const completeChallenge = async (id: string) => {
+    const targetChallenge = challenges.find(ch => ch.id === id);
+    if (!targetChallenge || targetChallenge.isCompleted) return;
+
+    const pointsReward = targetChallenge.pointsReward;
+    const completionDate = new Date().toISOString().split('T')[0];
+
+    if (isCloudMode && supabaseUserId) {
+      try {
+        // Update challenge
+        await supabase
+          .from('challenges')
+          .update({
+            is_completed: true,
+            completed_at: completionDate
+          })
+          .eq('id', id);
+
+        // Update profile points
+        const nextPoints = ecoPoints + pointsReward;
+        await supabase
+          .from('profiles')
+          .update({ eco_points: nextPoints })
+          .eq('id', supabaseUserId);
+        setEcoPoints(nextPoints);
+
+        // Unlock badges
+        let updatedBadges = [...badges];
+        if (targetChallenge.category === 'transport') updatedBadges = unlockBadge('green_commuter', updatedBadges);
+        if (targetChallenge.category === 'energy') updatedBadges = unlockBadge('energy_saver', updatedBadges);
+        if (targetChallenge.category === 'food') updatedBadges = unlockBadge('plant_powered', updatedBadges);
+        if (targetChallenge.category === 'consumption') updatedBadges = unlockBadge('waste_warrior', updatedBadges);
+
+        for (const b of updatedBadges) {
+          if (b.isEarned) {
+            await supabase
+              .from('badges')
+              .update({ is_earned: true, earned_at: b.earnedAt || completionDate })
+              .eq('id', b.id)
+              .eq('user_id', supabaseUserId);
+          }
+        }
+        setBadges(updatedBadges);
+
+        // Update local state challenges
+        setChallenges(prev => prev.map(ch => ch.id === id ? { ...ch, isCompleted: true, completedAt: completionDate } : ch));
+
+      } catch (err) {
+        console.error('Failed to complete challenge:', err);
+      }
+    } else {
+      setChallenges(prev => prev.map(ch => {
+        if (ch.id === id && !ch.isCompleted) {
           setEcoPoints(pts => pts + pointsReward);
 
           setTimeout(() => {
             setBadges(currBadges => {
               let updated = [...currBadges];
-              if (goal.category === 'transport') updated = unlockBadge('green_commuter', updated);
-              if (goal.category === 'energy') updated = unlockBadge('energy_saver', updated);
-              if (goal.category === 'food') updated = unlockBadge('plant_powered', updated);
-              if (goal.category === 'consumption') updated = unlockBadge('waste_warrior', updated);
-
-              const completedCount = goals.filter(g => g.isCompleted || g.id === id).length;
-              if (completedCount >= 3) {
-                updated = unlockBadge('goal_crusher', updated);
-              }
+              if (ch.category === 'transport') updated = unlockBadge('green_commuter', updated);
+              if (ch.category === 'energy') updated = unlockBadge('energy_saver', updated);
+              if (ch.category === 'food') updated = unlockBadge('plant_powered', updated);
+              if (ch.category === 'consumption') updated = unlockBadge('waste_warrior', updated);
               return updated;
             });
           }, 0);
+
+          return {
+            ...ch,
+            isCompleted: true,
+            completedAt: completionDate
+          };
         }
+        return ch;
+      }));
+    }
+  };
 
-        return {
-          ...goal,
-          currentValue: progress,
-          isCompleted: isNowCompleted
-        };
+  const resetApp = async () => {
+    if (isCloudMode && supabaseUserId) {
+      try {
+        // Delete records associated with user
+        await supabase.from('history').delete().eq('user_id', supabaseUserId);
+        await supabase.from('goals').delete().eq('user_id', supabaseUserId);
+        await supabase.from('challenges').delete().eq('user_id', supabaseUserId);
+        await supabase.from('badges').delete().eq('user_id', supabaseUserId);
+
+        // Reset profile
+        await supabase
+          .from('profiles')
+          .update({
+            onboarding_data: null,
+            calculation_result: null,
+            eco_points: 0
+          })
+          .eq('id', supabaseUserId);
+
+        setUserProfile(null);
+        setCalculationResult(null);
+        setHistory([]);
+        setGoals([]);
+        setChallenges([]);
+        setEcoPoints(0);
+        setBadges(INITIAL_BADGES);
+
+      } catch (err) {
+        console.error('Failed to reset app:', err);
       }
-      return goal;
-    }));
-  };
+    } else {
+      if (!currentUser) return;
+      const email = currentUser.email;
 
-  const deleteGoal = (id: string) => {
-    setGoals(prev => prev.filter(g => g.id !== id));
-  };
+      setUserProfile(null);
+      setCalculationResult(null);
+      setHistory([]);
+      setGoals([]);
+      setChallenges([]);
+      setEcoPoints(0);
+      setBadges(INITIAL_BADGES);
 
-  const completeChallenge = (id: string) => {
-    setChallenges(prev => prev.map(ch => {
-      if (ch.id === id && !ch.isCompleted) {
-        setEcoPoints(pts => pts + ch.pointsReward);
-
-        setTimeout(() => {
-          setBadges(currBadges => {
-            let updated = [...currBadges];
-            if (ch.category === 'transport') updated = unlockBadge('green_commuter', updated);
-            if (ch.category === 'energy') updated = unlockBadge('energy_saver', updated);
-            if (ch.category === 'food') updated = unlockBadge('plant_powered', updated);
-            if (ch.category === 'consumption') updated = unlockBadge('waste_warrior', updated);
-            return updated;
-          });
-        }, 0);
-
-        return {
-          ...ch,
-          isCompleted: true,
-          completedAt: new Date().toISOString().split('T')[0]
-        };
-      }
-      return ch;
-    }));
-  };
-
-  const resetApp = () => {
-    if (!currentUser) return;
-    const email = currentUser.email;
-
-    setUserProfile(null);
-    setCalculationResult(null);
-    setHistory([]);
-    setGoals([]);
-    setChallenges([]);
-    setEcoPoints(0);
-    setBadges(INITIAL_BADGES);
-
-    localStorage.removeItem(`ecotrack_profile_${email}`);
-    localStorage.removeItem(`ecotrack_result_${email}`);
-    localStorage.removeItem(`ecotrack_history_${email}`);
-    localStorage.removeItem(`ecotrack_goals_${email}`);
-    localStorage.removeItem(`ecotrack_challenges_${email}`);
-    localStorage.removeItem(`ecotrack_points_${email}`);
-    localStorage.removeItem(`ecotrack_badges_${email}`);
+      localStorage.removeItem(`ecotrack_profile_${email}`);
+      localStorage.removeItem(`ecotrack_result_${email}`);
+      localStorage.removeItem(`ecotrack_history_${email}`);
+      localStorage.removeItem(`ecotrack_goals_${email}`);
+      localStorage.removeItem(`ecotrack_challenges_${email}`);
+      localStorage.removeItem(`ecotrack_points_${email}`);
+      localStorage.removeItem(`ecotrack_badges_${email}`);
+    }
   };
 
   return (
@@ -697,13 +1192,16 @@ export const EcoTrackProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         level,
         login,
         signUp,
+        loginWithGoogle,
+        loginWithGithub,
         logout,
         submitOnboarding,
         addGoal,
         updateGoalProgress,
         deleteGoal,
         completeChallenge,
-        resetApp
+        resetApp,
+        isCloudMode
       }}
     >
       {children}
